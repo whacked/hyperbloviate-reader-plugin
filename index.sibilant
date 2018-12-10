@@ -1,6 +1,21 @@
 (var plugin-info
      {description: "viewer plugin for pdf and epub"})
 
+
+;; example requests from emacs
+;; https://github.com/whacked/json-rpc-request.el/
+;; 
+;; (json-rpc-request
+;;  (json-rpc-connect "localhost" 8002)
+;;  "/rpc" "epub"
+;;  (list :path "file:///path/to/alice.epub"
+;;        :search "Would you tell me, please, which way I ought to go from here"))
+;; 
+;; (json-rpc-request
+;;  (json-rpc-connect "localhost" 8002)
+;;  "/rpc" "pdf"
+;;  (list :path "file:///path/to/tracemonkey.pdf"
+;;        :search "Monkey observes that it has reached"))
 (var EPub
  (try
   (require "epub")
@@ -165,7 +180,113 @@
                 (pdf-viewer-prop null)
                 (|> (document.getElementById "pdf-viewer")
                     (set "innerHTML" ""))))
+     
+     (def load-epub! (input-uri maybe-options on-load)
+          (unload-pdf!)
+          (unload-epub!)
+          
+          (input-filepath input-uri)
+          
+          (var book (ePub input-uri))
+          (var rendition (book.renderTo
+                          "book-viewer"
+                          {flow: "scrolled-doc"
+                           width: "100%"
+                           height: "100%"
+                           }))
+          (book-rendition rendition)
+          (var displayed (rendition.display))
+          (|> displayed
+              (.then (#(section)
+                       (when on-load
+                             (on-load rendition)))))
+          
+          (current-index 0))
+     
+     (def load-pdf! (input-uri
+                     maybe-options
+                     on-load)
+          (unload-epub!)
+          (unload-pdf!)
+          
+          (input-filepath input-uri)
+          ;; see https://mozilla.github.io/pdf.js/examples/
+          
+          ;; ref https://github.com/mozilla/pdf.js/blob/master/examples/components/simpleviewer.js
+          (var container-el (document.getElementById
+                             "pdf-viewer-container")
+               
+               ;; Some PDFs need external cmaps.
+               CMAP_URL "node_modules/pdfjs-dist/cmaps/"
+               CMAP_PACKED true
+               
+               ;; (Optionally) enable hyperlinks within PDF files.
+               pdf-link-service (new pdfjsviewer.PDFLinkService)
+               ;; (Optionally) enable find controller.
+               pdf-find-controller (new pdfjsviewer.PDFFindController
+                                        {linkService: pdf-link-service})
+               
+               pdf-viewer (new pdfjsviewer.PDFViewer
+                               {container: container-el
+                                linkService: pdf-link-service
+                                findController: pdf-find-controller
+                                }))
+          
+          (pdf-viewer-prop pdf-viewer)
 
+          (.setViewer pdf-link-service pdf-viewer)
+          (container-el.addEventListener
+           "pagesinit"
+           (#>
+            ;; We can use pdfViewer now, e.g. let's change default scale.
+            (set pdf-viewer "currentScaleValue" "page-width")
+
+            (when on-load
+                  (on-load pdf-viewer))))
+          
+          ;; load document
+          (var loading-task (pdfjslib.getDocument
+                             {url: input-uri
+                              cMapUrl: CMAP_URL
+                              cMapPacked: CMAP_PACKED
+                              }))
+          
+          (loading-task.promise.then
+           (#(pdf-document)
+             (unload-epub!)
+             ;; Document loaded, specifying document for the viewer and
+             ;; the (optional) linkService.
+             (pdf-viewer.setDocument pdf-document)
+             (pdf-link-service.setDocument pdf-document null))))
+     
+     (set JsonRpcServer.HandlerMapping
+          "epub" (#(obj callback)
+                   (when obj.path
+                         (load-epub!
+                          obj.path
+                          {}
+                          (if (not obj.search)
+                              (#> (console.info "loaded without search"))
+                              (#(rendition)
+                                (epub-show-first-match!
+                                 (get rendition "book")
+                                 obj.search)))))
+                   (callback undefined {status: "ok"}))
+          
+          "pdf" (#(obj callback)
+                  (when obj.path
+                        (load-pdf!
+                         obj.path
+                         {}
+                         (if (not obj.search)
+                             (#> (console.info "loaded without search"))
+                             (#(viewer)
+                               (search-in-pdf
+                                (|> viewer
+                                    (get "findController"))
+                                obj.search)))))
+                  (callback undefined {status: "ok"})))
+     
      (m.mount
       control-element
       {view: (#> (m-miccup
@@ -188,82 +309,14 @@
                      {onclick: (#>
                                 (var maybe-path (dialog-get-file-path))
                                 (when maybe-path
-                                      (var input-uri (+ "file:///" maybe-path))
-                                      (input-filepath input-uri)
-                                      (var book (ePub input-uri))
-                                      (var rendition (book.renderTo
-                                                      "book-viewer"
-                                                      {flow: "scrolled-doc"
-                                                       width: "100%"
-                                                       height: "100%"
-                                                       }))
-                                      (unload-pdf!)
-                                      (book-rendition rendition)
-                                      (rendition.display)
-                                      
-                                      (current-index 0))
-                                )}
+                                      (load-epub! (+ "file:///" maybe-path))))}
                      "load book"]
 
                     ["button"
                      {onclick: (#>
                                 (var maybe-path (dialog-get-file-path))
                                 (when maybe-path
-                                      ;; (var input-filepath "T:/dump/transclusion-minor-mode/xcl/public/tracemonkey.pdf")
-                                      (var input-uri (+ "file:///" maybe-path))
-                                      (input-filepath input-uri)
-                                      ;; see https://mozilla.github.io/pdf.js/examples/
-
-                                      (unload-pdf!)
-                                      
-                                      ;; new example
-                                      ;; ref https://github.com/mozilla/pdf.js/blob/master/examples/components/simpleviewer.js
-                                      (var _ null
-
-                                           ;; Some PDFs need external cmaps.
-                                           CMAP_URL "node_modules/pdfjs-dist/cmaps/"
-                                           CMAP_PACKED true
-                                           
-                                           container-el (document.getElementById
-                                                         "pdf-viewer-container")
-                                           ;; (Optionally) enable hyperlinks within PDF files.
-                                           pdf-link-service (new pdfjsviewer.PDFLinkService)
-                                           ;; (Optionally) enable find controller.
-                                           pdf-find-controller (new pdfjsviewer.PDFFindController
-                                                                    {linkService: pdf-link-service})
-
-                                           pdf-viewer (new pdfjsviewer.PDFViewer
-                                                           {container: container-el
-                                                            linkService: pdf-link-service
-                                                            findController: pdf-find-controller
-                                                            }))
-                                      
-                                      (pdf-viewer-prop pdf-viewer)
-
-                                      (.setViewer pdf-link-service pdf-viewer)
-                                      ( ;; note the example uses document.addEventListener
-                                       container-el.addEventListener
-                                       "pagesinit"
-                                       (#>
-                                        ;; We can use pdfViewer now, e.g. let's change default scale.
-                                        (set pdf-viewer "currentScaleValue" "page-width")))
-
-                                      ;; load document
-                                      (var loading-task (pdfjslib.getDocument
-                                                         {url: input-uri
-                                                          ;; WARN: these urls may be broken
-                                                          cMapUrl: CMAP_URL
-                                                          cMapPacked: CMAP_PACKED
-                                                          }))
-
-                                      (loading-task.promise.then
-                                       (#(pdf-document)
-                                         (unload-epub!)
-                                         
-                                         ;; Document loaded, specifying document for the viewer and
-                                         ;; the (optional) linkService.
-                                         (pdf-viewer.setDocument pdf-document)
-                                         (pdf-link-service.setDocument pdf-document null)))))}
+                                      (load-pdf! (+ "file:///" maybe-path))))}
                      "load pdf"]]
                    ["div"
                     ["button"
