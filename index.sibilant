@@ -1,2 +1,372 @@
 (var plugin-info
      {description: "viewer plugin for pdf and epub"})
+
+(var EPub
+ (try
+  (require "epub")
+  (do
+   (console.error "NO epub"))))
+
+;; https://github.com/futurepress/epub.js/wiki/Tips-and-Tricks-(v0.3)
+(def get-epub-viewer-iframe (epub-book)
+     (epub-book.rendition.manager.container.querySelector "iframe"))
+
+(def epub-display-match! (epub-book match exact-string)
+     (assign exact-string (or exact-string
+                              (|> match
+                                  (get "excerpt")
+                                  (.replace (regex "^\\s*\\.\\.\\.\\s*") "")
+                                  (.replace (regex "\\s*\\.\\.\\.\\s*$") ""))))
+     (|> (epub-book.rendition.display
+          (get match "cfi"))
+         (.then
+          (#(section)
+            (|> (get-epub-viewer-iframe epub-book)
+                (get "contentWindow")
+                (.find exact-string))))))
+
+(def epub-find-string (epub-book s callback)
+     (assign callback
+             (or callback
+                 (#(results)
+                   (var maybe-match (first results))
+                   (when maybe-match
+                         (epub-display-match! maybe-match)))))
+
+     (|> (Promise.all
+          (epub-book.spine.spineItems.map
+           (#(item)
+             (|> item
+                 (.load (epub-book.load.bind epub-book))
+                 (.then (item.find.bind item s))))))
+         (.then (#(results)
+                  (|> (Promise.resolve
+                       (|> (get [] "concat")
+                           (.apply [] results)
+                           (callback))))))))
+
+(def epub-show-first-match! (epub-book s)
+     (epub-find-string
+      epub-book s
+      (#(match-results)
+        (var maybe-match (first match-results))
+        (when maybe-match
+              (epub-display-match! epub-book maybe-match s)))))
+
+(scoped
+ (var epub-js
+      (|> (document.createElement "script")
+          (tap
+           (set "type" "text/javascript"
+                "src" "node_modules/epubjs/dist/epub.js"))))
+ 
+ (var jszip-js
+      (|> (document.createElement "script")
+          (tap 
+           (set "type" "text/javascript"
+                "src" "node_modules/jszip/dist/jszip.min.js"))))
+ 
+ (|> (document.getElementsByTagName "head")
+     (get 0)
+     (tap (.appendChild epub-js))
+     (tap (.appendChild jszip-js))))
+
+(var pdfjslib
+ (try
+  (scoped
+   ;; REQUIRED for pdfjs worker
+   (require "pdfjs-dist/build/pdf.worker.entry")
+   (require "pdfjs-dist"))
+  (do
+   (console.error "NO pdfjs-dist"))))
+
+(var pdfjsviewer
+     (require
+      "pdfjs-dist/web/pdf_viewer"))
+
+(def dialog-get-file-path ()
+     (var maybe-input-filepath
+          (|> (get (require "electron") "remote" "dialog")
+              (.showOpenDialog
+               (|> (get (require "electron")
+                        "remote")
+                   (.getCurrentWindow))
+               {properties: []})))
+     (when maybe-input-filepath
+           (first maybe-input-filepath)))
+
+
+(def search-in-pdf (pdf-find-controller query-string again?)
+     (.executeCommand
+      pdf-find-controller
+      (if again?
+          "findagain"
+          "find")
+      {caseSensitive: false 
+       findPrevious: null
+       highlightAll: true 
+       phraseSearch: true 
+       query: query-string
+       }))
+
+(def load-pdfjs-css! (css-path)
+     (console.warn "loading pdf.js css...")
+     (var css-path "./node_modules/pdfjs-dist/web/pdf_viewer.css"
+          el-id (|> css-path
+                    (.replace (regex "\\W" "g") "-")
+                    (.replace (regex "^\\W+") "")))
+     (when (not (document.getElementById el-id))
+           (var link (|> (document.createElement "link")
+                         (tap (set "id" el-id))
+                         (tap (set "rel" "stylesheet"))
+                         (tap (set "type" "text/css"))
+                         (tap (set "href" css-path))
+                         (tap (set "media" "all"))))
+           (|> (first (document.getElementsByTagName "head"))
+               (.appendChild link))))
+
+(def start-plugin! (control-element view-element)
+     ;; (var control-element (document.getElementById "panel-A")
+     ;;      view-element (document.getElementById "panel-B"))
+
+     (var input-filepath (m-prop "")
+          current-index (m-prop null)
+          book-rendition (m-prop null)
+          pdf-viewer-prop (m-prop null)
+
+          search-string (m-prop "")
+          in-search? (m-prop false)
+
+          goto-pdf-index! (#(index)
+                            (when (pdf-viewer-prop)
+                                  (assign
+                                   (get (pdf-viewer-prop)
+                                        "currentPageNumber")
+                                   (+ 1 index))))
+          
+          goto-book-index! (#(index)
+                             (when (book-rendition)
+                                   (|> (book-rendition)
+                                       (.display index))
+                                   (current-index index))))
+     
+     (def unload-epub! ()
+          (book-rendition null)
+          (|> (document.getElementById "book-viewer")
+              (set "innerHTML" "")))
+
+     (def unload-pdf! ()
+          (when (pdf-viewer-prop)
+                (|> (pdf-viewer-prop)
+                    (tap
+                     (|> (get "pdfDocument")
+                         (.destroy)))
+                    (.setDocument null))
+                (pdf-viewer-prop null)
+                (|> (document.getElementById "pdf-viewer")
+                    (set "innerHTML" ""))))
+
+     (m.mount
+      control-element
+      {view: (#> (m-miccup
+                  ["div"
+                   {style: {display: "flex"
+                            height: "100%"
+                            flexDirection: "column"
+                            fontSize: "8pt"
+                            fontFamily: "Consolas, Inconsolata, Monaco, Ubuntu, Monospace"
+                            }}
+                   ["span" "open file:"]
+                   ["input"
+                    {type: "text"
+                     style: {width: "100%"}
+                     value: (input-filepath)
+                     onchange: (#(evt)
+                                 (input-filepath (get evt 'target 'value)))}]
+                   ["div"
+                    ["button"
+                     {onclick: (#>
+                                (var maybe-path (dialog-get-file-path))
+                                (when maybe-path
+                                      (var input-uri (+ "file:///" maybe-path))
+                                      (input-filepath input-uri)
+                                      (var book (ePub input-uri))
+                                      (var rendition (book.renderTo
+                                                      "book-viewer"
+                                                      {flow: "scrolled-doc"
+                                                       width: "100%"
+                                                       height: "100%"
+                                                       }))
+                                      (unload-pdf!)
+                                      (book-rendition rendition)
+                                      (rendition.display)
+                                      
+                                      (current-index 0))
+                                )}
+                     "load book"]
+
+                    ["button"
+                     {onclick: (#>
+                                (var maybe-path (dialog-get-file-path))
+                                (when maybe-path
+                                      ;; (var input-filepath "T:/dump/transclusion-minor-mode/xcl/public/tracemonkey.pdf")
+                                      (var input-uri (+ "file:///" maybe-path))
+                                      (input-filepath input-uri)
+                                      ;; see https://mozilla.github.io/pdf.js/examples/
+
+                                      (unload-pdf!)
+                                      
+                                      ;; new example
+                                      ;; ref https://github.com/mozilla/pdf.js/blob/master/examples/components/simpleviewer.js
+                                      (var _ null
+
+                                           ;; Some PDFs need external cmaps.
+                                           CMAP_URL "node_modules/pdfjs-dist/cmaps/"
+                                           CMAP_PACKED true
+                                           
+                                           container-el (document.getElementById
+                                                         "pdf-viewer-container")
+                                           ;; (Optionally) enable hyperlinks within PDF files.
+                                           pdf-link-service (new pdfjsviewer.PDFLinkService)
+                                           ;; (Optionally) enable find controller.
+                                           pdf-find-controller (new pdfjsviewer.PDFFindController
+                                                                    {linkService: pdf-link-service})
+
+                                           pdf-viewer (new pdfjsviewer.PDFViewer
+                                                           {container: container-el
+                                                            linkService: pdf-link-service
+                                                            findController: pdf-find-controller
+                                                            }))
+                                      
+                                      (pdf-viewer-prop pdf-viewer)
+
+                                      (.setViewer pdf-link-service pdf-viewer)
+                                      ( ;; note the example uses document.addEventListener
+                                       container-el.addEventListener
+                                       "pagesinit"
+                                       (#>
+                                        ;; We can use pdfViewer now, e.g. let's change default scale.
+                                        (set pdf-viewer "currentScaleValue" "page-width")))
+
+                                      ;; load document
+                                      (var loading-task (pdfjslib.getDocument
+                                                         {url: input-uri
+                                                          ;; WARN: these urls may be broken
+                                                          cMapUrl: CMAP_URL
+                                                          cMapPacked: CMAP_PACKED
+                                                          }))
+
+                                      (loading-task.promise.then
+                                       (#(pdf-document)
+                                         (unload-epub!)
+                                         
+                                         ;; Document loaded, specifying document for the viewer and
+                                         ;; the (optional) linkService.
+                                         (pdf-viewer.setDocument pdf-document)
+                                         (pdf-link-service.setDocument pdf-document null)))))}
+                     "load pdf"]]
+                   ["div"
+                    ["button"
+                     {onclick: (#>
+                                (when (> (current-index) 0)
+                                      (var prev-index (- (current-index) 1))
+
+                                      (when (book-rendition)
+                                            (scoped
+                                             (goto-book-index! prev-index)
+                                             (current-index prev-index)))
+
+                                      (when (pdf-viewer-prop)
+                                            (scoped
+                                             (goto-pdf-index! prev-index)
+                                             (current-index prev-index)))))}
+                     "< prev"]
+                    ["button"
+                     {onclick: (#>
+                                (when (and (book-rendition)
+                                           (< (current-index)
+                                              (- (|> (book-rendition)
+                                                     (get "book"
+                                                          "spine"
+                                                          "spineItems"
+                                                          "length"))
+                                                 1)))
+                                      (var next-index (+ (current-index) 1))
+                                      (goto-book-index! next-index)
+                                      (current-index next-index))
+
+                                (when (and (pdf-viewer-prop)
+                                           (< (current-index)
+                                              (- (get (pdf-viewer-prop)
+                                                      "pagesCount")
+                                                 1)))
+                                      
+                                      (var next-index (+ (current-index) 1))
+                                      (goto-pdf-index! next-index)
+                                      (current-index next-index)))}
+                     "next >"]
+                    ["div"
+                     ["input"
+                      {type: "text"
+                       style: {width: "10em"}
+                       value: (search-string)
+                       onchange: (#(evt)
+                                   (in-search? false)
+                                   (search-string (get evt 'target 'value)))}]
+                     ["button"
+                      {type: "button"
+                       onclick: (#>
+                                 (var maybe-search-string
+                                      (|> (search-string)
+                                          (.replace (regex "^\\s*") "")
+                                          (.replace (regex "\\s*$") "")))
+                                 (when (< 0 (get maybe-search-string "length"))
+                                       
+                                       (when (book-rendition)
+                                             (epub-show-first-match!
+                                              (get (book-rendition)
+                                                   "book")
+                                              maybe-search-string))
+                                       
+                                       (when (pdf-viewer-prop)
+                                             (search-in-pdf
+                                              (get (pdf-viewer-prop)
+                                                   "findController")
+                                              maybe-search-string
+                                              (in-search?)))
+                                       
+                                       (in-search? true)
+                                       ))}
+                      "search"]]
+                    ]]))})
+     
+     (m.mount
+      view-element
+      {oncreate: (#(vnode)
+                   (load-pdfjs-css!)
+                   (var dom-node (get vnode "dom"))
+                   ;; important -- needed for JS interaction
+                   (dom-node.addEventListener
+                    "did-finish-load"
+                    (#> (Hyperbloviate.bindWebviewInterop dom-node))))
+       view: (#> (m-miccup ["div"
+                            {style: {width: "100%"
+                                     height: "100%"
+                                     position: "relative"}}
+                            ["div"
+                             {id: "book-viewer"
+                              style: {color: "brown"}}]
+                            ["div"
+                             {id: "pdf-viewer-container"
+                              style: {overflow: "auto"
+                                      position: "absolute"
+                                      width: "100%"
+                                      height: "100%"}}
+                             ["div"
+                              {id: "pdf-viewer"
+                               class: "pdfViewer"}]
+                             ]]))}))
+
+(set exports
+     'info plugin-info
+     'start start-plugin!)
