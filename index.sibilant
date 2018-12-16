@@ -26,6 +26,64 @@
   (do
    (console.error "NO epub"))))
 
+;; * useful values
+;; ** epub.js
+;; book.rendition.getContents()[0].window.getSelection() -> <Selection>
+;; book.rendition.on("selected", function(cfiRange, contents) { })
+;;   of:
+;;   - <string> cfiRange like epubcfi(/6/8[item7]!/4,/202/1:92,/206/1:44)
+;;   - <Contents> contents
+;; book.rendition.location.start.cfi -> <string>
+;;   like "epubcfi(/6/8[item7]!/4/198/1:0)"
+;; ** calibre
+;; cfi.scroll_to("/2/4/198/1:137")
+
+(def epubcfi-is-directive (s)
+     (and (s.startsWith "epubcfi(")
+          (s.endsWith ")")))
+
+(def epubcfi-strip-directive (s)
+     (if (epubcfi-is-directive s)
+         (.substring
+          s 8 (- (get s "length") 1))
+         s))
+
+(def epubcfi-wrap-directive (s)
+     (if (epubcfi-is-directive s)
+         s
+         (+ "epubcfi(" s ")")))
+
+(def epubcfi-to-calibrecfi (book maybe-cfi)
+     (var cfi
+          (if (= (typeof maybe-cfi) "string")
+              (new ePub.CFI maybe-cfi)
+              maybe-cfi))
+     (var cfi-string (|> (get cfi "str")
+                         (epubcfi-strip-directive))
+          item-id (|> cfi-string
+                      (.replace (regex "^^[^\\[]+\\[([^\\]]+).*")
+                                "$1"))
+          child-number (|> cfi-string
+                           (.replace (regex "^.+?(\\d+)\\[.+")
+                                     "$1")
+                           (parseInt)))
+
+     (+ "/"
+        (- (get book.spine.spineById item-id) 1)
+        (|> cfi-string
+            (.split "!")
+            (last))))
+
+(def parse-epub-cfiRange (cfiRange)
+     (var cfi-range-spl (|> cfiRange
+                            (epubcfi-strip-directive)
+                            (.split ","))
+          cfi-range-base (get cfi-range-spl 0))
+     [(epubcfi-wrap-directive
+       (+ cfi-range-base (get cfi-range-spl 1)))
+      (epubcfi-wrap-directive
+       (+ cfi-range-base (get cfi-range-spl 2)))])
+
 ;; https://github.com/futurepress/epub.js/wiki/Tips-and-Tricks-(v0.3)
 (def get-epub-viewer-iframe (epub-book)
      (epub-book.rendition.manager.container.querySelector "iframe"))
