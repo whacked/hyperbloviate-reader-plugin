@@ -1,6 +1,10 @@
 (var plugin-info
      {description: "viewer plugin for pdf and epub"})
 
+;; will require adding deps from the transclusion project
+;; npm install epub jsdom pdfjs-dist yesql
+
+(var xcl (require "../plugin/hyperbloviate-reader-plugin/transclusion.js"))
 
 ;; example requests from emacs
 ;; https://github.com/whacked/json-rpc-request.el/
@@ -262,29 +266,61 @@
      (set JsonRpcServer.HandlerMapping
           "epub" (#(obj callback)
                    (when obj.path
-                         (load-epub!
-                          obj.path
-                          {}
-                          (if (not obj.search)
-                              (#> (console.info "loaded without search"))
-                              (#(rendition)
-                                (epub-show-first-match!
-                                 (get rendition "book")
-                                 obj.search)))))
+                         (input-filepath obj.path)
+
+                         (var do-load!
+                              (#(obj)
+                                (load-epub!
+                                 obj.path
+                                 {}
+                                 (if obj.search
+                                     (#(rendition)
+                                       (epub-show-first-match!
+                                        (get rendition "book")
+                                        obj.search))
+
+                                     true
+                                     (#> (console.info "loaded without search"))))))
+                         
+                         (if obj.query
+                             (xcl.getExactTextFromPartialStringMatch
+                              (obj.path.replace "file:///" "")
+                              (obj.query.replace "..." " ")
+                              (#(args)
+                                (assign args.search args.excerpt)
+                                (do-load! (Object.assign obj args))))
+
+                             (do-load! obj)))
                    (callback undefined {status: "ok"}))
           
           "pdf" (#(obj callback)
                   (when obj.path
-                        (load-pdf!
-                         obj.path
-                         {}
-                         (if (not obj.search)
-                             (#> (console.info "loaded without search"))
-                             (#(viewer)
-                               (search-in-pdf
-                                (|> viewer
-                                    (get "findController"))
-                                obj.search)))))
+                        (input-filepath obj.path)
+
+                        (var do-load!
+                             (#> (load-pdf!
+                                  obj.path
+                                  {}
+                                  (if obj.search
+                                      (#(viewer)
+                                        (search-in-pdf
+                                         (|> viewer
+                                             (get "findController"))
+                                         obj.search))
+
+                                      true
+                                      (#> (console.info "loaded without search"))))))
+
+                        (if obj.query
+                            (xcl.getExactTextFromPartialStringMatch
+                             (obj.path.replace "file:///" "")
+                             (obj.query.replace "..." " ")
+                             (#(args)
+                                (assign args.search args.excerpt)
+                               (do-load! (Object.assign obj args)))
+
+                             (do-load!))))
+                  
                   (callback undefined {status: "ok"})))
      
      (m.mount
